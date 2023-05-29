@@ -64,6 +64,12 @@ pub use types::{S3ListingItem, S3Object, S3PathParam};
 
 pub use esthri_internals::new_https_connector;
 
+#[derive(Debug)]
+pub struct CopyResult {
+	pub object_info: Option<HeadObjectInfo>,
+	pub md5: Option<String>,
+}
+
 pub const FILTER_EMPTY: Option<&[GlobFilter]> = None;
 
 pub async fn compute_etag(path: impl AsRef<Path>) -> Result<String> {
