@@ -18,6 +18,7 @@ use crate::{
     opts::*,
     rusoto::S3,
     upload, S3PathParam,
+	CopyResult,
 };
 
 #[logfn(err = "ERROR")]
@@ -26,7 +27,7 @@ pub async fn copy<T>(
     source: S3PathParam,
     destination: S3PathParam,
     opts: AwsCopyOptParams,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3 + Sync + Send + Clone,
 {
