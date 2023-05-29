@@ -16,13 +16,14 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use futures::{future, stream, Future, Stream, StreamExt, TryStreamExt};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use log_derive::logfn;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt},
     sync::Mutex,
 };
+use md5::{Md5,Digest};
 
 use crate::{
     compression::compress_to_tempfile,
@@ -31,6 +32,7 @@ use crate::{
     handle_dispatch_error,
     opts::*,
     rusoto::*,
+	CopyResult,
 };
 
 static PENDING_UPLOADS: parking_lot::Mutex<Vec<PendingUpload>> =
@@ -108,7 +110,7 @@ pub async fn upload<T>(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriPutOptParams,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
 {
@@ -138,7 +140,7 @@ pub async fn upload_from_reader<T, R>(
     reader: R,
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
@@ -164,7 +166,7 @@ pub async fn upload_from_reader_with_storage_class<T, R>(
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
     storage_class: S3StorageClass,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
@@ -195,7 +197,7 @@ pub async fn upload_file_helper<T>(
     path: &Path,
     compressed: bool,
     storage_class: S3StorageClass,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
 {
@@ -211,8 +213,7 @@ where
             Some(crate::compression::compressed_file_metadata()),
             storage_class,
         )
-        .await?;
-        Ok(())
+        .await
     } else {
         let f = File::open(path).await?;
         let size = f.metadata().await?.len();
@@ -227,11 +228,11 @@ async fn empty_upload<T>(
     key: &str,
     metadata: Option<HashMap<String, String>>,
     storage_class: S3StorageClass,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
 {
-    handle_dispatch_error(|| async {
+    let put_output = handle_dispatch_error(|| async {
         s3.put_object(PutObjectRequest {
             bucket: bucket.into(),
             key: key.into(),
@@ -244,7 +245,20 @@ where
     })
     .await
     .map_err(Error::PutObjectFailed)?;
-    Ok(())
+    Ok(
+		CopyResult {
+			object_info: Some(HeadObjectInfo {
+				e_tag: put_output.e_tag.unwrap_or("".to_string()),
+				last_modified: std::time::SystemTime::now().into(),
+				size: 0,
+				storage_class,
+				parts: 1,
+				metadata: metadata.unwrap_or(HashMap::<String,String>::new()),
+
+			}),
+			md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_string()),
+		}
+	)
 }
 
 async fn singlepart_upload<T, R>(
@@ -255,7 +269,7 @@ async fn singlepart_upload<T, R>(
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
     storage_class: S3StorageClass,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
     R: AsyncRead,
@@ -267,8 +281,11 @@ where
         let read = reader.read_buf(&mut buf).await?;
         total += read as u64;
     }
+	let mut hasher = Md5::new();
+	hasher.update(&buf);
+	let md5 = format!("{:x}",hasher.finalize());
     let body = buf.freeze();
-    handle_dispatch_error(|| async {
+    let output = handle_dispatch_error(|| async {
         s3.put_object(PutObjectRequest {
             bucket: bucket.into(),
             key: key.into(),
@@ -283,7 +300,19 @@ where
     })
     .await
     .map_err(Error::PutObjectFailed)?;
-    Ok(())
+
+	let cr = CopyResult {
+			object_info: Some(HeadObjectInfo {
+				e_tag: output.e_tag.unwrap_or("".to_string()),
+				last_modified: std::time::SystemTime::now().into(),
+				size: file_size as i64,
+				storage_class,
+				parts: 1,
+				metadata: metadata.unwrap_or(HashMap::<String,String>::new()),
+			}),
+			md5: Some(md5),
+	};
+    Ok(cr)
 }
 
 async fn multipart_upload<T, R>(
@@ -294,17 +323,19 @@ async fn multipart_upload<T, R>(
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
     storage_class: S3StorageClass,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
+	let orig_metadata = metadata.clone();
     let upload_id = create_multipart_upload(s3, bucket, key, metadata, storage_class)
         .await?
         .upload_id
         .ok_or(Error::UploadIdNone)?;
     debug!("upload_id: {}", upload_id);
     add_pending(PendingUpload::new(bucket, key, &upload_id));
+	let mut hasher = Md5::new();
 
     let completed_parts = {
         let mut parts: Vec<_> = upload_request_stream(
@@ -321,13 +352,38 @@ where
         .try_collect()
         .await?;
         parts.sort_unstable_by_key(|a| a.part_number);
+		for part in &parts {
+			let e_tag = part.e_tag.clone().unwrap_or("".to_string()).replace("\"", "");
+			let e_tag_bin = hex::decode(e_tag).unwrap();
+			hasher.update(e_tag_bin);
+		}
         parts
     };
 
-    complete_multipart_upload(s3, bucket, key, &upload_id, &completed_parts).await?;
+	let part_count = completed_parts.len();
+	let md5 = format!("{:x}-{}",hasher.finalize(),part_count);
+	let output = complete_multipart_upload(s3, bucket, key, &upload_id, &completed_parts).await?;
+	if output.e_tag.is_none() ||
+		(output.e_tag.is_some() &&
+		 &output.e_tag.as_ref().unwrap().replace("\"","") != &md5) {
+			error!("ETAG: {}, Calculated ETAG: {}",output.e_tag.unwrap(),md5);
+			return Err(Error::InvalidS3ETag);
+	}
     remove_pending(&upload_id);
+    Ok(
+		CopyResult {
+			object_info: Some(HeadObjectInfo {
+				e_tag: output.e_tag.unwrap_or("".to_string()),
+				last_modified: std::time::SystemTime::now().into(),
+				size: 0,
+				storage_class,
+				parts: 1,
+				metadata: orig_metadata.unwrap_or(HashMap::<String,String>::new()),
+			}),
+			md5: Some(md5),
+		}
+	)
 
-    Ok(())
 }
 
 // Creates a stream of smaller chunks for a larger chunk of data. This
