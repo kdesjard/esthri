@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use crate::{ops::sync::GlobFilter, opts::*, rusoto::*, HeadObjectInfo, Result, S3PathParam};
+use crate::{ops::sync::GlobFilter, opts::*, rusoto::*, HeadObjectInfo, Result, S3PathParam, CopyResult};
 
 #[tokio::main]
 pub async fn head_object<T>(
@@ -33,7 +33,7 @@ pub async fn upload<T>(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriPutOptParams,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3 + Send + Clone,
 {
@@ -47,7 +47,7 @@ pub async fn download<T>(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriGetOptParams,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3 + Sync + Send + Clone,
 {
