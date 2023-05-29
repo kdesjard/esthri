@@ -46,6 +46,8 @@ use tokio::{
 
 use super::DEAFULT_EXPIRATION;
 
+pub use esthri_internals::rusoto::CompleteMultipartUploadOutput;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PresignedMultipartUpload {
     pub upload_id: String,
@@ -142,7 +144,7 @@ pub async fn complete_presigned_multipart_upload(
     bucket: impl AsRef<str>,
     key: impl AsRef<str>,
     presigned_multipart_upload: PresignedMultipartUpload,
-) -> Result<()> {
+) -> Result<CompleteMultipartUploadOutput> {
     let parts: Vec<_> = presigned_multipart_upload
         .parts
         .into_iter()
