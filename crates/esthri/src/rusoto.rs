@@ -218,11 +218,11 @@ pub async fn complete_multipart_upload<T>(
     key: &str,
     upload_id: &str,
     completed_parts: &[CompletedPart],
-) -> Result<()>
+) -> Result<CompleteMultipartUploadOutput>
 where
     T: S3,
 {
-    handle_dispatch_error(|| async {
+    let upload_output = handle_dispatch_error(|| async {
         let cmur = CompleteMultipartUploadRequest {
             bucket: bucket.into(),
             key: key.into(),
@@ -236,7 +236,7 @@ where
     })
     .await
     .map_err(Error::CompletedMultipartUploadFailed)?;
-    Ok(())
+    Ok(upload_output)
 }
 
 pub async fn create_multipart_upload<T>(
