@@ -31,6 +31,7 @@ use crate::{
     opts::*,
     rusoto::*,
     tempfile::TempFile,
+	CopyResult,
 };
 
 #[logfn(err = "ERROR")]
@@ -40,7 +41,7 @@ pub async fn download<T>(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriGetOptParams,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3 + Sync + Send + Clone,
 {
@@ -110,7 +111,7 @@ async fn download_file<T>(
     key: &str,
     download_path: &Path,
     transparent_decompression: bool,
-) -> Result<()>
+) -> Result<CopyResult>
 where
     T: S3 + Send + Sync + Clone,
 {
@@ -163,7 +164,12 @@ where
         dest.persist(download_path.into()).await?;
     }
 
-    Ok(())
+    Ok(
+		CopyResult {
+			object_info: Some(obj_info),
+			md5: None,
+		}
+	)
 }
 
 /// Fetches an object as a stream of `Byte`s
