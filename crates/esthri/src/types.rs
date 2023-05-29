@@ -114,6 +114,7 @@ impl S3Listing {
 pub struct S3Object {
     pub key: String,
     pub e_tag: String,
+	pub storage_class: Option<String>,
 }
 
 /// For syncing from remote to local, or local to remote, "metadata" is attached to the listing in

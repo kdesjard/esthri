@@ -318,7 +318,7 @@ where
                 warn!("unexpected: object ETag was null");
                 continue;
             };
-            listing.contents.push(S3Object { key, e_tag });
+            listing.contents.push(S3Object { key, e_tag, storage_class: object.storage_class });
         }
     }
 
