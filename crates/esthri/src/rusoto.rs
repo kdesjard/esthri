@@ -25,7 +25,7 @@ use crate::{retry::handle_dispatch_error, Error, Result};
 pub use esthri_internals::rusoto::*;
 
 /// The data returned from a head object request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HeadObjectInfo {
     pub e_tag: String,
     pub size: i64,
