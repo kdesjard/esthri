@@ -64,7 +64,7 @@ pub use types::{S3ListingItem, S3Object, S3PathParam};
 
 pub use esthri_internals::new_https_connector;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CopyResult {
 	pub object_info: Option<HeadObjectInfo>,
 	pub md5: Option<String>,
