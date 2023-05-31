@@ -68,7 +68,7 @@ pub async fn download_streaming<'a, T>(
     bucket: &'a str,
     key: &'a str,
     transparent_decompression: bool,
-) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>>
+) -> Result<(HeadObjectInfo,Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>)>
 where
     T: S3 + Sync,
 {
@@ -83,7 +83,7 @@ async fn download_streaming_internal<'a, T>(
     bucket: &'a str,
     key: &'a str,
     transparent_decompression: bool,
-) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>>
+) -> Result<(HeadObjectInfo,Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>)>
 where
     T: S3 + Sync,
 {
@@ -96,12 +96,12 @@ where
         let src = StreamReader::new(stream);
         let dest = GzipDecoderReader::new(src);
         let reader = ReaderStream::new(dest);
-        Ok(Box::pin(futures::TryStreamExt::map_err(
+        Ok((obj_info,Box::pin(futures::TryStreamExt::map_err(
             reader,
             Error::IoError,
-        )))
+        ))))
     } else {
-        Ok(Box::pin(stream))
+        Ok((obj_info,Box::pin(stream)))
     }
 }
 
