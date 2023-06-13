@@ -19,7 +19,7 @@ use std::{
 use async_compression::tokio::{bufread::GzipDecoder as GzipDecoderReader, write::GzipDecoder};
 use bytes::Bytes;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
-use log::info;
+use log::debug;
 use log_derive::logfn;
 use tokio::io;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -45,7 +45,7 @@ pub async fn download<T>(
 where
     T: S3 + Sync + Send + Clone,
 {
-    info!(
+    debug!(
         "get: bucket={}, key={}, file={}",
         bucket.as_ref(),
         key.as_ref(),
@@ -118,7 +118,7 @@ where
     let obj_info = head_object_request(s3, bucket, key, Some(1))
         .await?
         .ok_or_else(|| Error::GetObjectInvalidKey(key.into()))?;
-    info!(
+    debug!(
         "parts={} part_size={} total_size={}",
         obj_info.parts,
         obj_info.size,
@@ -219,7 +219,7 @@ async fn init_download_dir(path: &Path) -> Result<PathBuf> {
                 path
             };
             if !dir.exists() && !dir.as_os_str().is_empty() {
-                info!("Creating directory path {:?}", dir.as_os_str());
+                debug!("Creating directory path {:?}", dir.as_os_str());
                 std::fs::create_dir_all(&dir)?;
             }
             Ok(dir)

@@ -16,7 +16,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use futures::{future, stream, Future, Stream, StreamExt, TryStreamExt};
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use log_derive::logfn;
 use tokio::{
     fs::File,
@@ -64,7 +64,7 @@ impl PendingUpload {
     where
         T: S3,
     {
-        info!(
+        debug!(
             "abort: bucket={}, key={}, upload_id={}",
             self.bucket, self.key, self.upload_id
         );
@@ -114,7 +114,7 @@ pub async fn upload<T>(
 where
     T: S3,
 {
-    info!(
+    debug!(
         "put: bucket={}, key={}, file={}",
         bucket.as_ref(),
         key.as_ref(),
@@ -172,7 +172,7 @@ where
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
     let (bucket, key) = (bucket.as_ref(), key.as_ref());
-    info!(
+    debug!(
         "put: bucket={}, key={}, file_size={}, storage_class={}",
         bucket, key, file_size, storage_class
     );
