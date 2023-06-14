@@ -32,7 +32,7 @@ use std::{marker::Unpin, path::Path};
 pub use crate::config::Config;
 use crate::{retry::handle_dispatch_error, rusoto::*, types::S3Listing};
 use futures::{stream, TryStream, TryStreamExt};
-use log::{info, warn};
+use log::{warn,info,debug};
 use log_derive::logfn;
 use md5::{Digest, Md5};
 use tokio::{
@@ -235,7 +235,7 @@ where
 {
     let (bucket, key) = (bucket.as_ref().to_owned(), key.as_ref().to_owned());
 
-    info!("stream-objects: bucket={}, key={}", bucket, key);
+    debug!("stream-objects: bucket={}, key={}", bucket, key);
 
     let continuation: Option<String> = None;
     let delimiter = delimiter.map(|s| s.as_ref().to_owned());
@@ -253,9 +253,8 @@ where
             let listing =
                 list_objects_request(s3, &bucket, &key, prev_continuation, delimiter.clone())
                     .await?;
-            let continuation = listing.continuation.clone();
 
-            info!("found count: {}", listing.count());
+            let continuation = listing.continuation.clone();
 
             if listing.continuation.is_some() {
                 Ok(Some((
