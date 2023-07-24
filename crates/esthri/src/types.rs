@@ -115,6 +115,8 @@ pub struct S3Object {
     pub key: String,
     pub e_tag: String,
 	pub storage_class: Option<String>,
+	pub size: Option<i64>,
+	pub last_modified: Option<String>,
 }
 
 /// For syncing from remote to local, or local to remote, "metadata" is attached to the listing in
