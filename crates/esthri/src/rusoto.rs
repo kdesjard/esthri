@@ -104,6 +104,34 @@ where
     }
 }
 
+/*
+pub async fn restore_object_request<T>(
+    s3: &T,
+    bucket: &str,
+    key: &str,
+	opts: &Option<RestoreRequest>,
+) -> Result<RestoreObjectOutput>
+where
+    T: S3,
+{
+
+    let res = handle_dispatch_error(|| async {
+        s3.restore_object(RestoreObjectRequest {
+            bucket: bucket.into(),
+            key: key.into(),
+			restore_request: opts.clone(),
+            ..Default::default()
+        })
+        .await
+    })
+    .await;
+    match res {
+        Ok(r) => Ok(r),
+        Err(err) => Err(Error::RestoreObjectFailure(err)),
+    }
+}
+*/
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, EnumIter, EnumString, Display)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum S3StorageClass {
