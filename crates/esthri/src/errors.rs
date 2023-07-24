@@ -98,6 +98,9 @@ pub enum Error {
     #[error(transparent)]
     DeleteObjectsFailed(#[from] RusotoError<DeleteObjectsError>),
 
+    #[error(transparent)]
+    RestoreObjectFailure(#[from] RusotoError<RestoreObjectError>),
+
     #[error("invalid key, did not exist remotely: {0}")]
     GetObjectInvalidKey(String),
 
