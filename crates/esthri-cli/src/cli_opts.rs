@@ -1,25 +1,15 @@
-use std::path::PathBuf;
-
 use clap::Args;
-use esthri::{opts::*, rusoto::*, S3PathParam};
+use esthri::aws_sdk::StorageClass as S3StorageClass;
+use esthri::{opts::*, S3PathParam};
 use glob::Pattern;
+use std::path::PathBuf;
 
 // Esthri does this by default (and can currently only do this), exposing this
 // as an option just ensures that Esthri will still be able to handle the case
 // when the acl option is specified and set to this value
 const S3_ACL_OPTIONS: &[&str] = &["bucket-owner-full-control"];
 
-const STORAGE_CLASSES: &[&str] = &[
-    S3StorageClass::Standard.to_str(),
-    S3StorageClass::StandardIA.to_str(),
-    S3StorageClass::RRS.to_str(),
-    S3StorageClass::OneZoneIA.to_str(),
-    S3StorageClass::GlacierDeepArchive.to_str(),
-    S3StorageClass::GlacierFlexibleRetrieval.to_str(),
-    S3StorageClass::GlacierInstantRetrieval.to_str(),
-    S3StorageClass::Outposts.to_str(),
-    S3StorageClass::IntelligentTiering.to_str(),
-];
+const STORAGE_CLASSES: &[&str] = S3StorageClass::values();
 
 #[derive(Args, Debug, Clone)]
 pub struct AwsCopyParams {
@@ -99,7 +89,7 @@ pub struct EsthriPutParams {
 impl EsthriPutParams {
     pub fn build_opts(&self) -> EsthriPutOptParams {
         let opts = EsthriPutOptParamsBuilder::default()
-            .storage_class(self.storage_class)
+            .storage_class(self.storage_class.clone())
             .transparent_compression(self.compress)
             .build()
             .unwrap();

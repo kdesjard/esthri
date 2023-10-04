@@ -1,9 +1,9 @@
 [package]
 name = "esthri-cli"
 description = "Extremely simple (memory stable) S3 client that supports get, put, head, list, and sync."
-version = "10.0.3"
+version = "11.0.3"
 authors = ["Swift Navigation <dev@swift-nav.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 repository = "https://github.com/swift-nav/esthri/"
 homepage = "https://github.com/swift-nav/esthri/"
@@ -28,7 +28,7 @@ name = "esthri_server"
 path = "src/http_server.rs"
 
 [dependencies]
-esthri = { version = "10.0.3", path = "../esthri", default-features = false }
+esthri = { version = "11.0.0", path = "../esthri", default-features = false }
 anyhow = { version = "1", features = ["backtrace"] }
 async-compression = { version = "0.4", features = ["gzip", "tokio"] }
 async_zip = "0.0.7"
@@ -44,17 +44,17 @@ log-derive = "0.4"
 maud = "0.22"
 mime_guess = "2.0"
 once_cell = "1.7"
-sanitize-filename = "0.4"
+sanitize-filename = "0.5"
 serde = "1"
 clap = { version = "4.0.26", features = ["derive", "env"] }
 tokio = { version = "1.23.0", features = ["rt-multi-thread", "signal", "sync"] }
-tokio-util = { version = "0.7.8", features = ["compat", "codec"] }
+tokio-util = { version = "0.7.9", features = ["compat", "codec"] }
 warp = "0.3"
 
 [dev-dependencies]
 esthri = { path = "../esthri", default-features = false, features=["blocking"] }
 esthri-test = { path = "../esthri-test" }
-assert_cmd = "2.0.5"
+assert_cmd = "2.0.12"
 backtrace = "0.3"
 fs_extra = "1.3"
 md5 = "0.7"

@@ -1,7 +1,7 @@
 [package]
 name = "esthri"
 description = "Extremely simple (memory stable) S3 client that supports get, put, head, list, and sync."
-version = "10.0.3"
+version = "11.0.3"
 authors = ["Swift Navigation <dev@swift-nav.com>"]
 edition = "2021"
 license = "MIT"
@@ -9,12 +9,12 @@ repository = "https://github.com/swift-nav/esthri/"
 homepage = "https://github.com/swift-nav/esthri/"
 readme = "../../README.md"
 keywords = ["aws", "s3"]
-rust-version = "1.69.0"
+rust-version = "1.72.0"
 
 [features]
 default = ["blocking", "rustls"]
 aggressive_lint = []
-blocking = ["tokio/rt"]
+blocking = ["tokio/rt", "tokio/macros", "tokio/rt-multi-thread"]
 nativetls = ["esthri-internals/nativetls", "reqwest/native-tls"]
 rustls = ["esthri-internals/rustls", "reqwest/rustls-tls"]
 
@@ -25,12 +25,12 @@ bytes = "1"
 chrono = "0.4"
 derive_builder = "0.12.0"
 envy = "0.4"
-futures = { version = "0.3", default-features = false }
+futures = { version = "0.3", features = ["std"], default-features = false }
 glob = "0.3"
 hex = "0.4"
 log = "0.4"
 log-derive = "0.4"
-md-5 = "0.10.5"
+md-5 = "0.10.6"
 once_cell = "1"
 parking_lot = "0.12"
 regex = "1"
@@ -40,15 +40,22 @@ thiserror = "1"
 tokio = { version = "1.28", features = ["fs", "io-util", "sync", "parking_lot"] }
 tokio-retry = "0.3"
 tokio-stream = "0.1.14"
-tokio-util = { version = "0.7.8", features = ["io"] }
+tokio-util = { version = "0.7.9", features = ["io"] }
 walkdir = "2"
-strum = "0.24.1"
+strum = "0.25.0"
 strum_macros = "0.24.3"
-reqwest = { version="0.11.18", features=["stream", "json"], default-features = false }
+reqwest = { version="0.11.22", features=["stream", "json"], default-features = false }
 serde-tuple-vec-map = "1.0.1"
 
+aws-sdk-s3 = { workspace = true }
+aws-smithy-http = { workspace = true }
+aws-smithy-client = { workspace = true }
+aws-types = { workspace = true }
+aws-config = { workspace = true }
+aws-smithy-types-convert = { workspace = true }
+
 [dependencies.esthri-internals]
-version = "10.0.3"
+version = "11.0.0"
 path = "../esthri-internals"
 
 [dev-dependencies]
@@ -57,4 +64,4 @@ tar = "0.4"
 tempdir = "0.3"
 backtrace = "0.3"
 fs_extra = "1.3"
-assert_cmd = "2.0.5"
+assert_cmd = "2.0.12"

@@ -4,12 +4,11 @@ use glob::Pattern;
 use tempdir::TempDir;
 use tempfile::tempdir;
 
-use esthri::{
-    blocking, opts::*, rusoto::S3Client, sync, sync_streaming, GlobFilter, S3PathParam,
-    FILTER_EMPTY,
-};
+use esthri::{blocking, opts::*, sync, sync_streaming, GlobFilter, S3PathParam, FILTER_EMPTY};
 use esthri_test::{validate_key_hash_pairs, KeyHashPair};
 use tokio_stream::StreamExt;
+
+use aws_sdk_s3::Client as S3Client;
 
 #[test]
 fn test_sync_down() {
@@ -38,7 +37,7 @@ fn test_sync_down() {
 
 #[tokio::test]
 async fn test_sync_down_async() {
-    let s3client = esthri_test::get_s3client();
+    let s3client = esthri_test::get_s3client_async().await;
     let local_directory = esthri_test::test_data_dir();
     let s3_key = "test_folder/";
     let filters: Option<Vec<GlobFilter>> = Some(vec![
@@ -135,7 +134,7 @@ fn test_sync_up() {
 
 #[tokio::test]
 async fn test_sync_up_async() {
-    let s3client = esthri_test::get_s3client();
+    let s3client = esthri_test::get_s3client_async().await;
     let local_directory = esthri_test::test_data_dir();
     let s3_key = esthri_test::randomised_lifecycled_prefix("test_folder/");
     let filters: Option<Vec<GlobFilter>> = Some(vec![
@@ -314,9 +313,9 @@ fn test_sync_across_delete() {
         esthri_test::randomised_lifecycled_prefix("test_sync_across_delete_dst/");
 
     // Create a dummy file. Deletion of this file will be indicative of test success
-    let temp_directory = tempdir().expect("Unabel to create temp directory");
+    let temp_directory = tempdir().expect("Unable to create temp directory");
     let file_pathbuf = temp_directory.path().join("delete-me.txt");
-    let mut _to_be_delete_file =
+    let _to_be_delete_file =
         fs::File::create(&file_pathbuf).expect("Error encountered while creating file");
 
     let temp_directory_as_pathbuf = temp_directory.as_ref().to_path_buf();
@@ -331,11 +330,12 @@ fn test_sync_across_delete() {
     // Copy the dummy file to one of the test buckets
     let res = blocking::sync(
         s3client.as_ref(),
-        local_source,
+        local_source.clone(),
         destination.clone(),
         FILTER_EMPTY,
         opts,
     );
+    println!("{}", local_source.clone());
     assert!(res.is_ok());
 
     // Expect bucket to have been populated
@@ -449,7 +449,7 @@ fn test_sync_down_filter() {
 
 #[tokio::test]
 async fn test_sync_across() {
-    let s3client = esthri_test::get_s3client();
+    let s3client = esthri_test::get_s3client_async().await;
     let source_prefix = "test_sync_folder1/";
     let dest_prefix = esthri_test::randomised_lifecycled_prefix("test_sync_folder2/");
 
@@ -657,7 +657,7 @@ fn test_sync_down_compressed_mixed() {
 
 #[tokio::test]
 async fn test_sync_down_async_streaming() {
-    let s3client = esthri_test::get_s3client();
+    let s3client = esthri_test::get_s3client_async().await;
     let local_directory = esthri_test::test_data_dir();
     let s3_key = "test_folder/";
     let filters: Vec<GlobFilter> = vec![

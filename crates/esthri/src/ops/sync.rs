@@ -10,6 +10,7 @@
  * WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
+use async_stream::stream;
 use std::{
     borrow::Cow,
     io::ErrorKind,
@@ -18,6 +19,9 @@ use std::{
 
 use futures::{future, pin_mut, Future, Stream, StreamExt, TryStreamExt};
 
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::copy_object::CopyObjectOutput;
+use aws_sdk_s3::Client;
 use glob::Pattern;
 use log::{debug, info, warn};
 use log_derive::logfn;
@@ -33,16 +37,15 @@ use crate::{
     compute_etag,
     config::Config,
     errors::{Error, Result},
-    handle_dispatch_error, list_objects_stream,
+    head_object_request, list_objects_stream,
     opts::*,
-    rusoto::*,
     tempfile::TEMP_FILE_PREFIX,
     types::ListingMetadata,
     types::{S3ListingItem, S3PathParam},
 };
 
 struct MappedPathResult {
-    file_path: Box<dyn AsRef<Path>>,
+    file_path: Box<dyn AsRef<Path> + Send + Sync>,
     source_path: PathBuf,
     local_etag: Result<Option<String>>,
     metadata: Option<ListingMetadata>,
@@ -114,16 +117,13 @@ impl SyncedFile {
 ///                   file will be included or excluded. If not supplied, then
 ///                   all files will be synced.
 #[logfn(err = "ERROR")]
-pub async fn sync<T>(
-    s3: &T,
+pub async fn sync(
+    s3: &Client,
     source: S3PathParam,
     destination: S3PathParam,
     glob_filters: Option<&[GlobFilter]>,
     opts: SharedSyncOptParams,
-) -> Result<()>
-where
-    T: S3 + Sync + Send + Clone,
-{
+) -> Result<()> {
     let filters: Vec<GlobFilter> = match glob_filters {
         Some(filters) => {
             let mut filters = filters.to_vec();
@@ -287,12 +287,12 @@ where
 {
     input_stream.map(move |params| async move {
         let (source_path, metadata) = params?;
-        let file_path: Box<dyn AsRef<Path>> = Box::new(source_path.clone());
+        let file_path: Box<dyn AsRef<Path> + Send + Sync> = Box::new(source_path.clone());
 
         let (file_path, source_path, local_etag) = match sync_cmd {
             SyncCmd::Up => {
                 let local_etag = if metadata.is_some() {
-                    compute_etag(&source_path).await.map(Option::Some)
+                    compute_etag(&source_path).await.map(Some)
                 } else {
                     Ok(None)
                 };
@@ -303,7 +303,7 @@ where
                 // should be compressed
                 let (tmp, _) = compress_to_tempfile(&source_path).await?;
                 let local_etag = if metadata.is_some() {
-                    compute_etag(tmp.path()).await.map(Option::Some)
+                    compute_etag(tmp.path()).await.map(Some)
                 } else {
                     Ok(None)
                 };
@@ -331,11 +331,11 @@ where
                         // the local file to see if it matches with
                         // the compressed version
                         let (tmp, _) = compress_to_tempfile(&source_path).await?;
-                        let local_etag = compute_etag(tmp.path()).await.map(Option::Some);
+                        let local_etag = compute_etag(tmp.path()).await.map(Some);
                         (file_path, source_path, local_etag)
                     }
                 } else {
-                    let local_etag = compute_etag(&source_path).await.map(Option::Some);
+                    let local_etag = compute_etag(&source_path).await.map(Some);
                     (file_path, source_path, local_etag)
                 }
             }
@@ -350,8 +350,8 @@ where
     })
 }
 
-fn local_to_remote_sync_tasks<ClientT, StreamT>(
-    s3: ClientT,
+fn local_to_remote_sync_tasks<StreamT>(
+    s3: Client,
     bucket: String,
     key: String,
     directory: PathBuf,
@@ -359,7 +359,6 @@ fn local_to_remote_sync_tasks<ClientT, StreamT>(
     transparent_compression: bool,
 ) -> impl Stream<Item = impl Future<Output = Result<()>>>
 where
-    ClientT: S3 + Send + Clone,
     StreamT: Stream<Item = MapPathResult>,
 {
     use super::upload::upload_from_reader;
@@ -376,7 +375,7 @@ where
         .map(move |clones| async move {
             let (s3, bucket, key, directory, entry) = clones;
             let MappedPathResult {
-                file_path: filepath,
+                file_path,
                 source_path,
                 local_etag,
                 metadata: object_info,
@@ -386,17 +385,14 @@ where
             let stripped_path = path.strip_prefix(&directory);
             let stripped_path = match stripped_path {
                 Err(e) => {
-                    warn!(
-                        "unexpected: failed to strip prefix: {}, {:?}, {:?}",
-                        e, &path, &directory
-                    );
+                    warn!("unexpected: failed to strip prefix: {e}, {path:?}, {directory:?}");
                     return Ok(());
                 }
                 Ok(result) => result,
             };
             let remote_path = remote_path.join(stripped_path);
             let remote_path = remote_path.to_string_lossy();
-            debug!("checking remote: {}", remote_path);
+            debug!("checking remote: {remote_path}");
             let local_etag = local_etag?;
             let metadata = if transparent_compression {
                 Some(crate::compression::compressed_file_metadata())
@@ -408,43 +404,34 @@ where
                 let remote_etag = object_info.e_tag;
                 let local_etag = local_etag.unwrap();
                 if remote_etag != local_etag {
-                    info!(
-                        "etag mis-match: {}, remote_etag={}, local_etag={}",
-                        remote_path, remote_etag, local_etag
-                    );
-                    let f = File::open(&*filepath).await?;
+                    info!("etag mis-match: {remote_path}, remote_etag={remote_etag}, local_etag={local_etag}");
+                    let f = File::open(&*file_path).await?;
                     let reader = BufReader::new(f);
-                    let size = fs::metadata(&*filepath).await?.len();
+                    let size = fs::metadata(&*file_path).await?.len();
                     upload_from_reader(&s3, bucket, remote_path, reader, size, metadata).await?;
                 } else {
-                    debug!(
-                        "etags matched: {}, remote_etag={}, local_etag={}",
-                        remote_path, remote_etag, local_etag
-                    );
+                    debug!("etags matched: {remote_path}, remote_etag={remote_etag}, local_etag={local_etag}");
                 }
             } else {
-                info!("file did not exist remotely: {}", remote_path);
-                let f = File::open(&*filepath).await?;
+                info!("file did not exist remotely: {remote_path}");
+                let f = File::open(&*file_path).await?;
                 let reader = BufReader::new(f);
-                let size = fs::metadata(&*filepath).await?.len();
+                let size = fs::metadata(&*file_path).await?.len();
                 upload_from_reader(&s3, bucket, remote_path, reader, size, metadata).await?;
             }
             Ok(())
         })
 }
 
-async fn sync_local_to_remote<T>(
-    s3: &T,
+async fn sync_local_to_remote(
+    s3: &Client,
     bucket: &str,
     key: &str,
     directory: impl AsRef<Path>,
     filters: &[GlobFilter],
     compressed: bool,
     delete: bool,
-) -> Result<()>
-where
-    T: S3 + Send + Sync + Clone,
-{
+) -> Result<()> {
     let directory = directory.as_ref();
     let task_count = Config::global().concurrent_sync_tasks();
 
@@ -455,7 +442,7 @@ where
             Err(e) => {
                 unreachable!(
                     "unexpected: failed to strip prefix: {}, {:?}, {:?}",
-                    e, &path, &directory
+                    e, path, directory
                 );
             }
         };
@@ -480,19 +467,17 @@ where
     };
 
     let etag_stream = translate_paths(dirent_stream, cmd).buffer_unordered(task_count);
-    let sync_tasks = local_to_remote_sync_tasks(
+    local_to_remote_sync_tasks(
         s3.clone(),
         bucket.into(),
         key.into(),
         directory.into(),
         etag_stream,
         compressed,
-    );
-
-    sync_tasks
-        .buffer_unordered(task_count)
-        .try_for_each_concurrent(task_count, |_| future::ready(Ok(())))
-        .await?;
+    )
+    .buffer_unordered(task_count)
+    .try_for_each_concurrent(task_count, |_| future::ready(Ok(())))
+    .await?;
 
     if delete {
         sync_delete_local(s3, bucket, key, directory, filters, task_count).await
@@ -502,34 +487,28 @@ where
 }
 
 /// Delete all files in `bucket's` `key` that do not exist within `directory`
-async fn sync_delete_local<T>(
-    s3: &T,
+async fn sync_delete_local(
+    s3: &Client,
     bucket: &str,
     key: &str,
     directory: &Path,
     filters: &[GlobFilter],
     task_count: usize,
-) -> Result<()>
-where
-    T: S3 + Send + Sync + Clone,
-{
+) -> Result<()> {
     let stream = flattened_object_listing(s3, bucket, key, directory, filters, false);
-    let delete_paths_stream = stream.try_filter_map(|object_info| async {
-        let (path, _, s3_metadata) = object_info;
-        if let Some(s3_metadata) = s3_metadata {
-            let fs_metadata = fs::metadata(&path).await;
-            if let Err(err) = fs_metadata {
-                if err.kind() == ErrorKind::NotFound {
-                    let obj_path = String::from(key) + &s3_metadata.s3_suffix;
-                    Ok(Some(obj_path))
-                } else {
-                    Err(err.into())
+    let delete_paths_stream = stream.try_filter_map(move |obj| {
+        let key = key.to_string();
+        async {
+            let (path, _, s3_metadata) = obj;
+            if let Some(s3_metadata) = s3_metadata {
+                match fs::metadata(&path).await {
+                    Ok(_) => Ok(None),
+                    Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
+                    Err(_) => Ok(Some(key + &s3_metadata.s3_suffix)),
                 }
             } else {
-                Ok(None)
+                Err(Error::MetadataNone)
             }
-        } else {
-            Err(Error::MetadataNone)
         }
     });
     pin_mut!(delete_paths_stream);
@@ -540,15 +519,12 @@ where
 }
 
 /// Delete all files in `directory` which do not exist withing a `bucket's` corresponding `directory` key prefix
-async fn sync_delete_remote<T>(
-    s3: &T,
+async fn sync_delete_remote(
+    s3: &Client,
     bucket: &str,
     directory: &Path,
     filters: &[GlobFilter],
-) -> Result<()>
-where
-    T: S3 + Send + Sync + Clone,
-{
+) -> Result<()> {
     // All files in local directory
     let local_stream = flattened_local_directory(directory, filters);
 
@@ -569,44 +545,38 @@ where
 }
 
 #[logfn(err = "ERROR")]
-async fn copy_object_request<T>(
-    s3: &T,
+async fn copy_object_request(
+    s3: &Client,
     source_bucket: &str,
     source_key: &str,
     file_name: &str,
     dest_bucket: &str,
     dest_key: &str,
-) -> Result<CopyObjectOutput>
-where
-    T: S3 + Send,
-{
-    let res = handle_dispatch_error(|| async {
-        let cor = CopyObjectRequest {
-            bucket: dest_bucket.to_string(),
-            copy_source: format!("{}/{}", source_bucket, file_name),
-            key: file_name.replace(source_key, dest_key),
-            ..Default::default()
-        };
+) -> Result<CopyObjectOutput> {
+    let res = s3
+        .copy_object()
+        .bucket(dest_bucket)
+        .key(file_name.replace(source_key, dest_key))
+        .copy_source(format!("{}/{}", source_bucket, file_name))
+        .send()
+        .await
+        .map_err(|e| match e {
+            SdkError::ServiceError(error) => Error::CopyObjectFailed(Box::new(error.into_err())),
+            _ => Error::SdkError(e.to_string()),
+        })?;
 
-        s3.copy_object(cor).await
-    })
-    .await;
-
-    Ok(res?)
+    Ok(res)
 }
 
-async fn sync_across<T>(
-    s3: &T,
+async fn sync_across(
+    s3: &Client,
     source_bucket: &str,
     source_prefix: &str,
     dest_bucket: &str,
     destination_key: &str,
     filters: &[GlobFilter],
     delete: bool,
-) -> Result<()>
-where
-    T: S3 + Send + Sync + Clone,
-{
+) -> Result<()> {
     let mut stream = list_objects_stream(s3, source_bucket, source_prefix);
 
     while let Some(from_entries) = stream.try_next().await? {
@@ -658,72 +628,56 @@ where
 }
 
 /// Delete all files in `directory` which do not exist withing a `bucket's` corresponding `directory` key prefix
-async fn sync_delete_across<T>(
-    s3: &T,
-    source_bucket: &str,
-    source_prefix: &str,
-    destination_bucket: &str,
-    destination_prefix: &str,
+async fn sync_delete_across(
+    s3: &Client,
+    src_bucket: &str,
+    src_prefix: &str,
+    dst_bucket: &str,
+    dst_prefix: &str,
     filters: &[GlobFilter],
-) -> Result<()>
-where
-    T: S3 + Send + Sync + Clone,
-{
+) -> Result<()> {
+    let task_count = Config::global().concurrent_sync_tasks();
     // Identify all files in destination bucket
-    let all_files_in_destination_bucket_stream = flattened_object_listing(
-        s3,
-        destination_bucket,
-        destination_prefix,
-        std::path::Path::new(source_prefix),
-        filters,
-        false,
-    );
-
+    let dir = Path::new(&src_prefix);
+    let bucket_stream = flattened_object_listing(s3, dst_bucket, dst_prefix, dir, filters, false);
     // For each file, perform a head_object_request on the source directory to determine if file only exists in the destination
-    let delete_paths_stream = all_files_in_destination_bucket_stream.try_filter_map(
-        |(_path, key, _s3_metadata)| async move {
-            let filename = key.strip_prefix(destination_prefix).unwrap();
-            let source_key = source_prefix.to_string() + filename;
-            if head_object_request(s3, source_bucket, &source_key, None)
-                .await?
-                .is_none()
-            {
-                Ok(Some(source_key))
-            } else {
-                Ok(None)
-            }
-        },
-    );
+    let delete_paths_stream = bucket_stream.try_filter_map(move |(_, key, _)| {
+        let s3 = s3.clone();
+        let src_bucket = src_bucket.to_string();
+        let src_prefix = src_prefix.to_string();
+        let dst_prefix = dst_prefix.to_string();
+        async move {
+            let filename = key.strip_prefix(&dst_prefix).unwrap();
+            let source_key = src_prefix + filename;
+            let head_object_info = head_object_request(&s3, &src_bucket, &source_key, None).await?;
+            Ok(head_object_info.map(|_| source_key))
+        }
+    });
 
     // Delete files that exist in destination, but not in source
     pin_mut!(delete_paths_stream);
-    crate::delete_streaming(s3, destination_bucket, delete_paths_stream)
-        .buffer_unordered(Config::global().concurrent_sync_tasks())
-        .try_for_each_concurrent(Config::global().concurrent_sync_tasks(), |_| {
-            future::ready(Ok(()))
-        })
+    crate::delete_streaming(s3, &dst_bucket, delete_paths_stream)
+        .buffer_unordered(task_count)
+        .try_for_each_concurrent(task_count, |_| future::ready(Ok(())))
         .await
 }
 
 // Create a result stream consisting of tuples for all files in bucket/prefix. Tuples are of the form (path to file locally <if applicable>, file prefix, file metadata)
-fn flattened_object_listing<'a, ClientT>(
-    s3: &'a ClientT,
+fn flattened_object_listing<'a>(
+    s3: &'a Client,
     bucket: &'a str,
     key: &'a str,
     directory: &'a Path,
     filters: &'a [GlobFilter],
     transparent_decompress: bool,
-) -> impl Stream<Item = Result<(PathBuf, String, Option<ListingMetadata>)>> + 'a
-where
-    ClientT: S3 + Send + Clone,
-{
+) -> impl Stream<Item = Result<(PathBuf, String, Option<ListingMetadata>)>> + 'a {
     let prefix = if key.ends_with('/') {
         Cow::Borrowed(key)
     } else {
         Cow::Owned(format!("{}/", key))
     };
 
-    async_stream::stream! {
+    stream! {
         let mut stream = list_objects_stream(s3, bucket, prefix);
         loop {
             let entries = match stream.try_next().await {
@@ -761,7 +715,7 @@ where
                 let path_result = Path::new(&entry.key).strip_prefix(key);
                 if let Ok(s3_suffix) = path_result {
                     if process_globs(&s3_suffix, filters).is_some() {
-                        let local_path = directory.join(&s3_suffix);
+                        let local_path = directory.join(s3_suffix);
                         let s3_suffix = s3_suffix.to_string_lossy().into();
                         yield Ok((
                             local_path,
@@ -778,8 +732,8 @@ where
     }
 }
 
-fn remote_to_local_sync_tasks<ClientT, StreamT>(
-    s3: ClientT,
+fn remote_to_local_sync_tasks<StreamT>(
+    s3: Client,
     bucket: String,
     key: String,
     directory: PathBuf,
@@ -787,7 +741,6 @@ fn remote_to_local_sync_tasks<ClientT, StreamT>(
     opts: SharedSyncOptParams,
 ) -> impl Stream<Item = impl Future<Output = Result<SyncedFile>>>
 where
-    ClientT: S3 + Sync + Send + Clone,
     StreamT: Stream<Item = MapPathResult>,
 {
     input_stream
@@ -868,17 +821,14 @@ where
         )
 }
 
-async fn sync_remote_to_local<T>(
-    s3: &T,
+async fn sync_remote_to_local(
+    s3: &Client,
     bucket: &str,
     key: &str,
     directory: impl AsRef<Path>,
     filters: &[GlobFilter],
     opts: SharedSyncOptParams,
-) -> Result<()>
-where
-    T: S3 + Sync + Send + Clone,
-{
+) -> Result<()> {
     let directory = directory.as_ref();
     let task_count = Config::global().concurrent_sync_tasks();
     let object_listing = flattened_object_listing(
@@ -918,17 +868,14 @@ where
     }
 }
 
-async fn download_with_dir<T>(
-    s3: &T,
+async fn download_with_dir(
+    s3: &Client,
     bucket: &str,
     s3_prefix: &str,
     s3_suffix: &str,
     local_dir: impl AsRef<Path>,
     opts: SharedSyncOptParams,
-) -> Result<()>
-where
-    T: S3 + Sync + Send + Clone,
-{
+) -> Result<()> {
     let local_dir = local_dir.as_ref();
     let dest_path = local_dir.join(s3_suffix);
 
@@ -959,16 +906,13 @@ pub mod streaming {
     ///                   file will be included or excluded. If not supplied, then
     ///                   all files will be synced.
     #[logfn(err = "ERROR")]
-    pub async fn sync<'a, T>(
-        s3: &'a T,
+    pub async fn sync<'a>(
+        s3: &'a Client,
         source: &'a S3PathParam,
         destination: &'a S3PathParam,
         filters: &'a [GlobFilter],
         opts: SharedSyncOptParams,
-    ) -> Result<impl Stream<Item = Result<SyncedFile>> + 'a>
-    where
-        T: S3 + Sync + Send + Clone,
-    {
+    ) -> Result<impl Stream<Item = Result<SyncedFile>> + 'a> {
         let (bucket, key, path) = match (source, destination) {
             (S3PathParam::Bucket { bucket, key }, S3PathParam::Local { path }) => {
                 info!(
@@ -988,17 +932,14 @@ pub mod streaming {
         Ok(sync_remote_to_local(s3, bucket, key, path.to_str().unwrap(), filters, opts).await)
     }
 
-    async fn sync_remote_to_local<'a, T>(
-        s3: &'a T,
+    async fn sync_remote_to_local<'a>(
+        s3: &'a Client,
         bucket: &'a str,
         key: &'a str,
         directory: &'a str,
         filters: &'a [GlobFilter],
         opts: SharedSyncOptParams,
-    ) -> impl Stream<Item = Result<SyncedFile>> + 'a
-    where
-        T: S3 + Sync + Send + Clone,
-    {
+    ) -> impl Stream<Item = Result<SyncedFile>> + 'a {
         let task_count = Config::global().concurrent_sync_tasks();
         let object_listing = flattened_object_listing(
             s3,

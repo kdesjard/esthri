@@ -10,12 +10,14 @@
  * WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-use std::{
-    borrow::Cow, collections::HashMap, convert::TryInto, io::SeekFrom, path::Path, sync::Arc,
-};
+use std::{borrow::Cow, collections::HashMap, io::SeekFrom, path::Path, sync::Arc};
 
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedPart, ObjectCannedAcl, StorageClass};
+use aws_sdk_s3::Client;
 use bytes::{Bytes, BytesMut};
-use futures::{future, stream, Future, Stream, StreamExt, TryStreamExt};
+use futures::{stream, Future, Stream, StreamExt, TryStreamExt};
 use log::{debug, error, warn};
 use log_derive::logfn;
 use tokio::{
@@ -26,13 +28,14 @@ use tokio::{
 use md5::{Md5,Digest};
 
 use crate::{
+    complete_multipart_upload,
     compression::compress_to_tempfile,
     config::Config,
+    create_multipart_upload,
     errors::{Error, Result},
-    handle_dispatch_error,
     opts::*,
-    rusoto::*,
 	CopyResult,
+	HeadObjectInfo,
 };
 
 static PENDING_UPLOADS: parking_lot::Mutex<Vec<PendingUpload>> =
@@ -60,34 +63,31 @@ impl PendingUpload {
 
     /// Abort this multipart upload
     #[logfn(err = "ERROR")]
-    pub async fn abort<T>(&self, s3: &T) -> Result<()>
-    where
-        T: S3,
+    pub async fn abort(&self, s3: &Client) -> Result<()>
     {
         debug!(
             "abort: bucket={}, key={}, upload_id={}",
             self.bucket, self.key, self.upload_id
         );
-        handle_dispatch_error(|| async {
-            let amur = AbortMultipartUploadRequest {
-                bucket: self.bucket.clone(),
-                key: self.key.clone(),
-                upload_id: self.upload_id.clone(),
-                ..Default::default()
-            };
-            s3.abort_multipart_upload(amur).await
-        })
-        .await?;
+        s3.abort_multipart_upload()
+            .bucket(self.bucket.clone())
+            .key(self.key.clone())
+            .upload_id(self.upload_id.clone())
+            .send()
+            .await
+            .map_err(|e| match e {
+                SdkError::ServiceError(error) => {
+                    Error::AbortMultipartUploadFailed(Box::new(error.into_err()))
+                }
+                _ => Error::SdkError(e.to_string()),
+            })?;
         Ok(())
     }
 
     /// Abort this multipart upload
     #[cfg(feature = "blocking")]
     #[tokio::main]
-    pub async fn abort_blocking<T>(self, s3: &T) -> Result<()>
-    where
-        T: S3 + Send,
-    {
+    pub async fn abort_blocking<T>(self, s3: &Client) -> Result<()> {
         self.abort(s3).await
     }
 }
@@ -104,15 +104,13 @@ fn add_pending(u: PendingUpload) {
 }
 
 #[logfn(err = "ERROR")]
-pub async fn upload<T>(
-    s3: &T,
+pub async fn upload(
+    s3: &Client,
     bucket: impl AsRef<str>,
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriPutOptParams,
 ) -> Result<CopyResult>
-where
-    T: S3,
 {
     debug!(
         "put: bucket={}, key={}, file={}",
@@ -133,8 +131,8 @@ where
 }
 
 #[logfn(err = "ERROR")]
-pub async fn upload_from_reader<T, R>(
-    s3: &T,
+pub async fn upload_from_reader<R>(
+    s3: &Client,
     bucket: impl AsRef<str>,
     key: impl AsRef<str>,
     reader: R,
@@ -142,7 +140,6 @@ pub async fn upload_from_reader<T, R>(
     metadata: Option<HashMap<String, String>>,
 ) -> Result<CopyResult>
 where
-    T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
     upload_from_reader_with_storage_class(
@@ -158,22 +155,21 @@ where
 }
 
 #[logfn(err = "ERROR")]
-pub async fn upload_from_reader_with_storage_class<T, R>(
-    s3: &T,
+pub async fn upload_from_reader_with_storage_class<R>(
+    s3: &Client,
     bucket: impl AsRef<str>,
     key: impl AsRef<str>,
     reader: R,
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
-    storage_class: S3StorageClass,
+    storage_class: StorageClass,
 ) -> Result<CopyResult>
 where
-    T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
     let (bucket, key) = (bucket.as_ref(), key.as_ref());
     debug!(
-        "put: bucket={}, key={}, file_size={}, storage_class={}",
+        "put: bucket={}, key={}, file_size={}, storage_class={:?}",
         bucket, key, file_size, storage_class
     );
 
@@ -190,16 +186,14 @@ where
 }
 
 #[logfn(err = "ERROR")]
-pub async fn upload_file_helper<T>(
-    s3: &T,
+pub async fn upload_file_helper(
+    s3: &Client,
     bucket: &str,
     key: &str,
     path: &Path,
     compressed: bool,
-    storage_class: S3StorageClass,
+    storage_class: StorageClass,
 ) -> Result<CopyResult>
-where
-    T: S3,
 {
     let key = format_key(key, path)?;
     if compressed {
@@ -222,30 +216,26 @@ where
     }
 }
 
-async fn empty_upload<T>(
-    s3: &T,
+async fn empty_upload(
+    s3: &Client,
     bucket: &str,
     key: &str,
     metadata: Option<HashMap<String, String>>,
-    storage_class: S3StorageClass,
-) -> Result<CopyResult>
-where
-    T: S3,
-{
-    let put_output = handle_dispatch_error(|| async {
-        s3.put_object(PutObjectRequest {
-            bucket: bucket.into(),
-            key: key.into(),
-            acl: Some("bucket-owner-full-control".into()),
-            metadata: metadata.as_ref().cloned(),
-            storage_class: Some(storage_class.to_string()),
-            ..Default::default()
-        })
+    storage_class: StorageClass,
+) -> Result<CopyResult> {
+    let put_output = s3.put_object()
+        .bucket(bucket)
+        .key(key)
+        .acl(ObjectCannedAcl::BucketOwnerFullControl)
+        .set_metadata(metadata.clone())
+        .storage_class(storage_class.clone())
+        .send()
         .await
-    })
-    .await
-    .map_err(Error::PutObjectFailed)?;
-    Ok(
+        .map_err(|e| match e {
+            SdkError::ServiceError(error) => Error::PutObjectFailed(Box::new(error.into_err())),
+            _ => Error::SdkError(e.to_string()),
+        })?;
+	Ok(
 		CopyResult {
 			object_info: Some(HeadObjectInfo {
 				e_tag: put_output.e_tag.unwrap_or("".to_string()),
@@ -254,24 +244,22 @@ where
 				storage_class,
 				parts: 1,
 				metadata: metadata.unwrap_or(HashMap::<String,String>::new()),
-
 			}),
 			md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_string()),
 		}
 	)
 }
 
-async fn singlepart_upload<T, R>(
-    s3: &T,
+async fn singlepart_upload<R>(
+    s3: &Client,
     bucket: &str,
     key: &str,
     reader: R,
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
-    storage_class: S3StorageClass,
+    storage_class: StorageClass,
 ) -> Result<CopyResult>
 where
-    T: S3,
     R: AsyncRead,
 {
     let mut buf = BytesMut::with_capacity(file_size as usize);
@@ -285,23 +273,22 @@ where
 	hasher.update(&buf);
 	let md5 = format!("{:x}",hasher.finalize());
     let body = buf.freeze();
-    let output = handle_dispatch_error(|| async {
-        s3.put_object(PutObjectRequest {
-            bucket: bucket.into(),
-            key: key.into(),
-            content_length: Some(body.len() as i64),
-            body: Some(into_byte_stream(body.clone())),
-            acl: Some("bucket-owner-full-control".into()),
-            metadata: metadata.as_ref().cloned(),
-            storage_class: Some(storage_class.to_string()),
-            ..Default::default()
-        })
+    let output = s3.put_object()
+        .bucket(bucket)
+        .key(key)
+        .content_length(body.len() as i64)
+        .body(into_byte_stream(body.clone()))
+        .acl(ObjectCannedAcl::BucketOwnerFullControl)
+        .set_metadata(metadata.clone())
+        .storage_class(storage_class.clone())
+        .send()
         .await
-    })
-    .await
-    .map_err(Error::PutObjectFailed)?;
+        .map_err(|e| match e {
+            SdkError::ServiceError(error) => Error::PutObjectFailed(Box::new(error.into_err())),
+            _ => Error::SdkError(e.to_string()),
+        })?;
 
-	let cr = CopyResult {
+		let cr = CopyResult {
 			object_info: Some(HeadObjectInfo {
 				e_tag: output.e_tag.unwrap_or("".to_string()),
 				last_modified: std::time::SystemTime::now().into(),
@@ -315,21 +302,20 @@ where
     Ok(cr)
 }
 
-async fn multipart_upload<T, R>(
-    s3: &T,
+async fn multipart_upload<R>(
+    s3: &Client,
     bucket: &str,
     key: &str,
     reader: R,
     file_size: u64,
     metadata: Option<HashMap<String, String>>,
-    storage_class: S3StorageClass,
+    storage_class: StorageClass,
 ) -> Result<CopyResult>
 where
-    T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
 	let orig_metadata = metadata.clone();
-    let upload_id = create_multipart_upload(s3, bucket, key, metadata, storage_class)
+    let upload_id = create_multipart_upload(s3, bucket, key, metadata, storage_class.clone())
         .await?
         .upload_id
         .ok_or(Error::UploadIdNone)?;
@@ -391,11 +377,11 @@ where
 // multipart uploads of 8MB. Giving the rusuto uploading a stream that
 // it can consume causes less memory to be used than giving it whole 8MB
 // chunks as there is less data waiting around to be uploaded.
-fn create_stream_for_chunk<R>(
+async fn create_stream_for_chunk<R>(
     reader: Arc<Mutex<R>>,
     file_size: u64,
     chunk_number: u64,
-) -> ByteStream
+) -> Result<ByteStream>
 where
     R: AsyncRead + AsyncSeek + Send + Unpin + 'static,
 {
@@ -432,12 +418,19 @@ where
             }
         },
     ));
-    let stream = stream.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
-    ByteStream::new_with_size(stream, to_read as usize)
+    let mut stream = stream.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
+
+    // stream needs to be collected into Bytes for ByteStream to be retryable
+    let mut collected_bytes = Vec::new();
+
+    while let Some(bytes) = stream.try_next().await? {
+        collected_bytes.extend_from_slice(&bytes);
+    }
+    Ok(ByteStream::from(collected_bytes))
 }
 
-async fn upload_request_stream<'a, T, R>(
-    s3: &'a T,
+async fn upload_request_stream<'a, R>(
+    s3: &'a Client,
     bucket: &'a str,
     key: &'a str,
     upload_id: &'a str,
@@ -446,56 +439,8 @@ async fn upload_request_stream<'a, T, R>(
     part_size: u64,
 ) -> impl Stream<Item = impl Future<Output = Result<CompletedPart>> + 'a> + 'a
 where
-    T: S3,
     R: AsyncRead + AsyncSeek + Unpin + Send + 'static,
 {
-    let reqs = upload_part_requests(bucket, key, upload_id, file_size, part_size);
-    let shared_reader = Arc::new(Mutex::new(reader));
-    reqs.map(move |req| {
-        let reader = shared_reader.clone();
-        (reader, req)
-    })
-    .map(move |(reader, req)| async move {
-        let res = handle_dispatch_error(|| async {
-            let body = create_stream_for_chunk(
-                reader.clone(),
-                file_size,
-                (req.part_number - 1).try_into().expect("Part number < 0"),
-            );
-            s3.upload_part(UploadPartRequest {
-                bucket: req.bucket.clone(),
-                key: req.key.clone(),
-                upload_id: req.upload_id.clone(),
-                part_number: req.part_number,
-                content_length: req.content_length,
-                body: Some(body),
-                ..Default::default()
-            })
-            .await
-        })
-        .await?;
-        if res.e_tag.is_none() {
-            warn!(
-                "upload_part e_tag was not present (part_number: {})",
-                req.part_number,
-            )
-        }
-        Ok(CompletedPart {
-            e_tag: res.e_tag,
-            part_number: Some(req.part_number),
-        })
-    })
-}
-
-/// Returns an iterator of requests used to upload an object.
-/// Notably these requests do not contain the body which must be added later.
-fn upload_part_requests<'a>(
-    bucket: &'a str,
-    key: &'a str,
-    upload_id: &'a str,
-    file_size: u64,
-    part_size: u64,
-) -> impl Stream<Item = UploadPartRequest> + 'a {
     let last_part = {
         let remaining = file_size % part_size;
         if remaining > 0 {
@@ -507,20 +452,48 @@ fn upload_part_requests<'a>(
     let sizes = (1..=file_size / part_size)
         .map(move |part_number| (part_number, part_size))
         .chain(last_part);
-    let requests = sizes.map(move |(part_number, part_size)| UploadPartRequest {
-        bucket: bucket.to_owned(),
-        key: key.to_owned(),
-        upload_id: upload_id.to_owned(),
-        part_number: part_number as i64,
-        content_length: Some(part_size as i64),
-        ..Default::default()
-    });
-    stream::iter(requests)
+    let shared_reader = Arc::new(Mutex::new(reader));
+
+    stream::iter(sizes)
+        .map(move |(part_number, part_size)| {
+            let reader = shared_reader.clone();
+            (reader, part_number, part_size)
+        })
+        .map(move |(reader, part_number, part_size)| async move {
+            let body = create_stream_for_chunk(reader.clone(), file_size, part_number - 1).await?;
+            let res = s3
+                .upload_part()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(part_number as i32)
+                .content_length(part_size as i64)
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| match e {
+                    SdkError::ServiceError(error) => {
+                        Error::UploadPartFailed(Box::new(error.into_err()))
+                    }
+                    _ => Error::SdkError(e.to_string()),
+                })?;
+
+            if res.e_tag.is_none() {
+                warn!(
+                    "upload_part e_tag was not present (part_number: {})",
+                    part_number,
+                )
+            }
+            let compeleted_part = CompletedPart::builder()
+                .set_e_tag(res.e_tag)
+                .part_number(part_number as i32)
+                .build();
+            Ok(compeleted_part)
+        })
 }
 
 fn into_byte_stream(chunk: Bytes) -> ByteStream {
-    let size_hint = chunk.len();
-    ByteStream::new_with_size(stream::once(future::ready(Ok(chunk))), size_hint)
+    ByteStream::from(chunk)
 }
 
 // This is to allow a user to upload to a prefix in a bucket, but relies on
