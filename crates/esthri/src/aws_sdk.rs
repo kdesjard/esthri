@@ -20,6 +20,7 @@ use std::{
 };
 
 use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadOutput;
 use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::{HeadObjectError, HeadObjectOutput};
@@ -228,7 +229,7 @@ pub async fn complete_multipart_upload(
     key: &str,
     upload_id: &str,
     completed_parts: &[CompletedPart],
-) -> Result<()> {
+) -> Result<CompleteMultipartUploadOutput> {
     let completed_parts = CompletedMultipartUpload::builder()
         .set_parts(Some(completed_parts.to_vec()))
         .build();
@@ -242,7 +243,7 @@ pub async fn complete_multipart_upload(
         .send()
         .await
     {
-        Ok(_) => Ok(()),
+        Ok(cmo) => Ok(cmo),
         Err(err) => match err {
             SdkError::ServiceError(error) => Err(Error::CompletedMultipartUploadFailed(Box::new(
                 error.into_err(),

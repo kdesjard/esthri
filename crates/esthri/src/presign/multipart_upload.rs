@@ -34,6 +34,7 @@ use crate::{
     Error, PendingUpload, Result,
 };
 use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadOutput;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::{presigning::PresigningConfig, types::CompletedPart};
 use reqwest::Client as HttpClient;
@@ -142,7 +143,7 @@ pub async fn complete_presigned_multipart_upload(
     bucket: impl AsRef<str>,
     key: impl AsRef<str>,
     presigned_multipart_upload: PresignedMultipartUpload,
-) -> Result<()> {
+) -> Result<CompleteMultipartUploadOutput> {
     let parts: Vec<_> = presigned_multipart_upload
         .parts
         .into_iter()
