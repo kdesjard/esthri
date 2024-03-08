@@ -36,7 +36,7 @@ pub async fn upload(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriPutOptParams,
-) -> Result<()> {
+) -> Result<HeadObjectInfo> {
     crate::upload(s3, bucket, key, file, opts).await
 }
 
@@ -47,7 +47,7 @@ pub async fn download(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriGetOptParams,
-) -> Result<()> {
+) -> Result<HeadObjectInfo> {
     crate::download(s3, bucket, key, file, opts).await
 }
 

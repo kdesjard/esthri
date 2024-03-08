@@ -17,7 +17,7 @@ use crate::{
     download,
     errors::{Error, Result},
     opts::*,
-    upload, S3PathParam,
+    upload, HeadObjectInfo, S3PathParam,
 };
 
 #[logfn(err = "ERROR")]
@@ -26,7 +26,7 @@ pub async fn copy(
     source: S3PathParam,
     destination: S3PathParam,
     opts: AwsCopyOptParams,
-) -> Result<()> {
+) -> Result<HeadObjectInfo> {
     match source {
         S3PathParam::Bucket { bucket, key } => match destination {
             S3PathParam::Local { path } => download(s3, bucket, key, path, opts.into()).await,

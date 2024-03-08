@@ -31,7 +31,7 @@ use crate::{
     get_object_part_request, head_object_request,
     opts::*,
     tempfile::TempFile,
-    GetObjectResponse,
+    GetObjectResponse, HeadObjectInfo,
 };
 
 #[logfn(err = "ERROR")]
@@ -41,7 +41,7 @@ pub async fn download(
     key: impl AsRef<str>,
     file: impl AsRef<Path>,
     opts: EsthriGetOptParams,
-) -> Result<()> {
+) -> Result<HeadObjectInfo> {
     info!(
         "get: bucket={}, key={}, file={}",
         bucket.as_ref(),
@@ -65,7 +65,10 @@ pub async fn download_streaming<'a>(
     bucket: &'a str,
     key: &'a str,
     transparent_decompression: bool,
-) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>> {
+) -> Result<(
+    HeadObjectInfo,
+    Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>,
+)> {
     // This is a wrapper for download_streaming_internal just to satisfy the
     // logfn macro, which seems to have issues with the two different stream
     // types returned
@@ -77,7 +80,10 @@ async fn download_streaming_internal<'a>(
     bucket: &'a str,
     key: &'a str,
     transparent_decompression: bool,
-) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>> {
+) -> Result<(
+    HeadObjectInfo,
+    Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>,
+)> {
     let obj_info = head_object_request(s3, bucket, key, Some(1))
         .await?
         .ok_or_else(|| Error::GetObjectInvalidKey(key.to_owned()))?;
@@ -87,12 +93,12 @@ async fn download_streaming_internal<'a>(
         let src = StreamReader::new(stream);
         let dest = GzipDecoderReader::new(src);
         let reader = ReaderStream::new(dest);
-        Ok(Box::pin(futures::TryStreamExt::map_err(
-            reader,
-            Error::IoError,
-        )))
+        Ok((
+            obj_info,
+            Box::pin(futures::TryStreamExt::map_err(reader, Error::IoError)),
+        ))
     } else {
-        Ok(Box::pin(stream))
+        Ok((obj_info, Box::pin(stream)))
     }
 }
 
@@ -102,7 +108,7 @@ async fn download_file(
     key: &str,
     download_path: &Path,
     transparent_decompression: bool,
-) -> Result<()> {
+) -> Result<HeadObjectInfo> {
     let obj_info = head_object_request(s3, bucket, key, Some(1))
         .await?
         .ok_or_else(|| Error::GetObjectInvalidKey(key.into()))?;
@@ -152,7 +158,7 @@ async fn download_file(
         dest.persist(download_path.into()).await?;
     }
 
-    Ok(())
+    Ok(obj_info)
 }
 
 /// Fetches an object as a stream of `Byte`s

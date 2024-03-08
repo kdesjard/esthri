@@ -298,7 +298,7 @@ async fn stream_object_to_archive(
     error_tracker: ErrorTrackerArc,
 ) -> bool {
     let stream = match download_streaming(s3, bucket, path, true).await {
-        Ok(byte_stream) => (byte_stream).map_err(into_io_error),
+        Ok((_, byte_stream)) => (byte_stream).map_err(into_io_error),
         Err(err) => {
             abort_with_error(
                 error_tracker.clone(),
@@ -600,7 +600,7 @@ async fn create_item_stream(
         // We don't decompress the file here as it will be served with the
         // correct content-encoding and be decompressed by the browser.
         let mut stream = match download_streaming(&s3, &bucket, &path, false).await {
-            Ok(byte_stream) => byte_stream,
+            Ok((_,byte_stream)) => byte_stream,
             Err(err) => {
                 yield Err(err);
                 return;
